@@ -1,0 +1,28 @@
+name: Fabriquer EXE
+
+on: [push]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Installer Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9' 
+          
+      - name: Installer les librairies
+        run: |
+          pip install -r requirements.txt
+          
+      - name: Créer l'EXE
+        run: |
+         pyinstaller --onefile --windowed pdf_extraction_v1.py
+          
+      - name: Télécharger le résultat
+        uses: actions/upload-artifact@v3
+        with:
+          name: MonApplicationWindows
+          path: dist/shippings_labels.exe
