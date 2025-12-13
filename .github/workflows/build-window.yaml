@@ -22,13 +22,14 @@ jobs:
 
       - name: Créer l'EXE
         run: |
-          pyinstaller --onefile --windowed --name shippings_labels pdf_extraction_v1.py
+          cd "Shipping labels"
+          pyinstaller --onefile --windowed --name="PDF_Label_Sorter" pdf_extraction_v1.py
 
       - name: Vérifier le dossier dist
-        run: dir dist
+        run: dir "Shipping labels/dist"
 
       - name: Télécharger le résultat
         uses: actions/upload-artifact@v4
         with:
-          name: MonApplicationWindows
-          path: dist/
+          name: PDF_Label_Sorter_Windows
+          path: Shipping labels/dist/
