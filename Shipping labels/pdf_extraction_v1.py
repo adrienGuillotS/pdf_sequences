@@ -252,14 +252,9 @@ class PDFApp:
             messagebox.showwarning("Warning", "Please select both PDF files.")
             return
         
-        # Save As Dialog
-        output_file = filedialog.asksaveasfilename(
-            defaultextension=".pdf", 
-            filetypes=[("PDF Files", "*.pdf")], 
-            initialfile="Sorted_Labels.pdf",
-            title="Save output file as..."
-        )
-        if not output_file: return
+        # Automatically set output file in the same directory as source file
+        source_dir = os.path.dirname(self.path_source.get())
+        output_file = os.path.join(source_dir, "Sorted_Labels.pdf")
 
         # Clear Logs and Start Thread
         self.log_area.config(state='normal')
