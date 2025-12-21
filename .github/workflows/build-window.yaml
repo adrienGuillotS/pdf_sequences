@@ -23,7 +23,7 @@ jobs:
       - name: Créer l'EXE
         run: |
           cd "Shipping labels"
-          pyinstaller --onefile --windowed --name="PDF_Label_Sorter_V3" pdf_extraction_v3.py
+          pyinstaller --onefile --windowed --name="PDF_Label_Sorter_V4" pdf_extraction_v3.py
 
       - name: Vérifier le dossier dist
         run: dir "Shipping labels/dist"
