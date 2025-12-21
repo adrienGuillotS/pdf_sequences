@@ -79,25 +79,29 @@ def find_matching_label(guide_id, labels_db, log_callback):
     First tries exact match, then tries matching by first 4 and last 4 digits.
     Returns: (matched_label_id, match_type) or (None, None)
     """
-    # Try exact match first
+    # Try exact match first - return as list for consistency
     if guide_id in labels_db:
-        return guide_id, "exact"
+        return [guide_id], "exact"
     
-    # Try flexible matching (first 4 + last 4 digits)
+    # Try flexible matching (first 4 + last 4 digits) - return ALL matches
     guide_first, guide_last = get_first_last_digits(guide_id)
     if not guide_first or not guide_last:
-        return None, None
+        return [], None
     
     log_callback(f"   🔍 Flexible search for {guide_id} (first: {guide_first}, last: {guide_last})")
     
+    matched_labels = []
     for label_id in labels_db.keys():
         label_first, label_last = get_first_last_digits(label_id)
         if label_first and label_last:
             if guide_first == label_first and guide_last == label_last:
-                log_callback(f"      ✓ Match found!")
-                return label_id, "flexible"
+                matched_labels.append(label_id)
     
-    return None, None
+    if matched_labels:
+        log_callback(f"      ✓ Match found! ({len(matched_labels)} label(s))")
+        return matched_labels, "flexible"
+    
+    return [], None
 
 def create_overlay_page(width, height, image_path, text_id, count,pos_x=15,pos_y=78,scale=0.07,img_y=10,size_police=11,rm_mode=False):
     packet = io.BytesIO()
@@ -228,70 +232,104 @@ def process_files(guide_path, input_pdf_paths, output_path, log_callback):
         # --- STEP 3: GENERATE MERGED & SORTED PDF ---
         log_callback("💾 Generating final PDF...")
         writer = PyPDF2.PdfWriter()
-        processed_ids = set()
+        processed_label_groups = set()  # Track which label groups have been processed
+        processed_individual_labels = set()  # Track individual label IDs that have been used
+        processed_guide_ids = set()  # Track which guide IDs have been processed
         missing_orders = []
-
-        # A. Process according to guide sequence
+        
+        # Group guide orders by their matched labels (can be multiple labels per guide order)
+        label_group_to_guide_orders = {}  # {frozenset(label_ids): [list of guide_ids]}
+        guide_to_label_group = {}  # {guide_id: frozenset(label_ids)}
+        
+        # First pass: find all matches and group them
         for order_id in guide_sequence:
-            count = guide_counts[order_id]
-            matched_id, match_type = find_matching_label(order_id, labels_db, log_callback)
+            matched_ids, match_type = find_matching_label(order_id, labels_db, log_callback)
             
-            if matched_id:
-                if match_type == "exact":
-                    log_callback(f"✅ MATCH: {order_id}")
-                else:
-                    log_callback(f"✅ MATCH (flexible): {order_id} → {matched_id}")
+            if matched_ids:
+                # Create a frozen set as key (order doesn't matter)
+                label_group = frozenset(matched_ids)
+                guide_to_label_group[order_id] = label_group
                 
-                for p in labels_db[matched_id]:
+                if label_group not in label_group_to_guide_orders:
+                    label_group_to_guide_orders[label_group] = []
+                label_group_to_guide_orders[label_group].append((order_id, match_type))
+            else:
+                missing_orders.append(order_id)
+        
+        # Second pass: process each unique label group with all its labels
+        for order_id in guide_sequence:
+            if order_id in processed_guide_ids:
+                continue  # Already processed as part of a group
+            
+            if order_id not in guide_to_label_group:
+                continue  # No match found
+                
+            label_group = guide_to_label_group[order_id]
+            
+            if label_group not in processed_label_groups:
+                # Get all guide orders that match this label group
+                matching_orders = label_group_to_guide_orders[label_group]
+                total_count = sum(guide_counts[gid] for gid, _ in matching_orders)
+                
+                # Log all matches
+                first_label = list(label_group)[0]
+                for gid, mtype in matching_orders:
+                    if mtype == "exact":
+                        log_callback(f"✅ MATCH: {gid}")
+                    else:
+                        log_callback(f"✅ MATCH (flexible): {gid} → {first_label}")
+                    processed_guide_ids.add(gid)
+                
+                # Add ALL labels in this group consecutively with all their pages
+                page_counter = 0
+                for label_id in sorted(label_group):  # Sort for consistent order
+                    if label_id in labels_db:
+                        pages_for_this_label = labels_db[label_id]
+                        processed_individual_labels.add(label_id)  # Track this label as used
+                        
+                        for p in pages_for_this_label:
+                            w = float(p.mediabox[2])
+                            h = float(p.mediabox[3])
+                            
+                            text = p.extract_text() or ""
+                            is_rm = "royal mail" in text.lower()
+                            
+                            # First page shows total count, subsequent pages show no count
+                            display_count = total_count if page_counter == 0 else 1
+                            page_counter += 1
+                            
+                            if is_rm:
+                                overlay = create_overlay_page(w, h, image_path, label_id, display_count, 158, -252, 0.06, 315, 9, rm_mode=True)
+                            else:
+                                overlay = create_overlay_page(w, h, image_path, label_id, display_count)
+                            
+                            p.merge_page(overlay)
+                            writer.add_page(p)
+                
+                processed_label_groups.add(label_group)
+
+        # Log missing orders
+        for order_id in missing_orders:
+            log_callback(f"❌ MISSING: {order_id}")
+
+        # B. Add extras not in guide at the end (labels that don't match any guide order)
+        for label_id, pages in labels_db.items():
+            if label_id not in processed_individual_labels:
+                log_callback(f"➕ EXTRA Added: {label_id}")
+                if pages:
+                    p = pages[0]
                     w = float(p.mediabox[2])
                     h = float(p.mediabox[3])
                     
-                    # Detect courier type from page
                     text = p.extract_text() or ""
                     is_rm = "royal mail" in text.lower()
                     
                     if is_rm:
-                        overlay = create_overlay_page(w, h, image_path, matched_id, count, 158, -252, 0.06, 315, 9, rm_mode=True)
+                        overlay = create_overlay_page(w, h, image_path, label_id, 1, 158, -252, 0.06, 315, 9, rm_mode=True)
                     else:
-                        overlay = create_overlay_page(w, h, image_path, matched_id, count)
-
+                        overlay = create_overlay_page(w, h, image_path, label_id, 1)
                     p.merge_page(overlay)
                     writer.add_page(p)
-                processed_ids.add(matched_id)
-            else:
-                missing_orders.append(order_id)
-                log_callback(f"❌ MISSING: {order_id}")
-
-        # B. Add extras not in guide (check if they match any guide order with flexible matching)
-        for label_id, pages in labels_db.items():
-            if label_id not in processed_ids:
-                # Check if this extra matches any guide order with flexible matching
-                is_duplicate = False
-                for guide_id in guide_sequence:
-                    if guide_id not in processed_ids:
-                        # Check flexible match
-                        guide_first, guide_last = get_first_last_digits(guide_id)
-                        label_first, label_last = get_first_last_digits(label_id)
-                        if guide_first and label_first and guide_first == label_first and guide_last == label_last:
-                            log_callback(f"⚠️  SKIP: {label_id} (matches missing guide order {guide_id})")
-                            is_duplicate = True
-                            break
-                
-                if not is_duplicate:
-                    log_callback(f"➕ EXTRA Added: {label_id}")
-                    for p in pages:
-                        w = float(p.mediabox[2])
-                        h = float(p.mediabox[3])
-                        
-                        text = p.extract_text() or ""
-                        is_rm = "royal mail" in text.lower()
-                        
-                        if is_rm:
-                            overlay = create_overlay_page(w, h, image_path, label_id, 1, 158, -252, 0.06, 315, 9, rm_mode=True)
-                        else:
-                            overlay = create_overlay_page(w, h, image_path, label_id, 1)
-                        p.merge_page(overlay)
-                        writer.add_page(p)
 
         with open(output_path, "wb") as f_out:
             writer.write(f_out)
