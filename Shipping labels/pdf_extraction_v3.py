@@ -42,6 +42,45 @@ def extract_one_id_from_label_text(text):
     match = re.search(pattern, text)
     return match.group(0) if match else None
 
+def extract_digits_only(id_text):
+    """Extract only digits from an ID."""
+    if not id_text: return ""
+    return re.sub(r"[^0-9]", "", id_text)
+
+def get_first_last_digits(id_text, n=4):
+    """Get first n and last n digits from an ID."""
+    id_text = id_text.split("-")[2]
+    digits = extract_digits_only(id_text)
+    if len(digits) < n * 2:
+        return None, None
+    return digits[:n], digits[-n:]
+
+def find_matching_label(guide_id, labels_db, log_callback):
+    """Find matching label with flexible matching.
+    
+    First tries exact match, then tries matching by first 4 and last 4 digits.
+    Returns: (matched_label_id, match_type) or (None, None)
+    """
+    # Try exact match first
+    if guide_id in labels_db:
+        return guide_id, "exact"
+    
+    # Try flexible matching (first 4 + last 4 digits)
+    guide_first, guide_last = get_first_last_digits(guide_id)
+    if not guide_first or not guide_last:
+        return None, None
+    
+    log_callback(f"   🔍 Flexible search for {guide_id} (first: {guide_first}, last: {guide_last})")
+    
+    for label_id in labels_db.keys():
+        label_first, label_last = get_first_last_digits(label_id)
+        if label_first and label_last:
+            if guide_first == label_first and guide_last == label_last:
+                log_callback(f"      ✓ Match found!")
+                return label_id, "flexible"
+    
+    return None, None
+
 def create_overlay_page(width, height, image_path, text_id, count,pos_x=15,pos_y=78,scale=0.07,img_y=10,size_police=11,rm_mode=False):
     packet = io.BytesIO()
     can = canvas.Canvas(packet, pagesize=(width, height))
@@ -177,9 +216,15 @@ def process_files(guide_path, input_pdf_paths, output_path, log_callback):
         # A. Process according to guide sequence
         for order_id in guide_sequence:
             count = guide_counts[order_id]
-            if order_id in labels_db:
-                log_callback(f"✅ MATCH: {order_id}")
-                for p in labels_db[order_id]:
+            matched_id, match_type = find_matching_label(order_id, labels_db, log_callback)
+            
+            if matched_id:
+                if match_type == "exact":
+                    log_callback(f"✅ MATCH: {order_id}")
+                else:
+                    log_callback(f"✅ MATCH (flexible): {order_id} → {matched_id}")
+                
+                for p in labels_db[matched_id]:
                     w = float(p.mediabox[2])
                     h = float(p.mediabox[3])
                     
@@ -194,7 +239,7 @@ def process_files(guide_path, input_pdf_paths, output_path, log_callback):
 
                     p.merge_page(overlay)
                     writer.add_page(p)
-                processed_ids.add(order_id)
+                processed_ids.add(matched_id)
             else:
                 missing_orders.append(order_id)
                 log_callback(f"❌ MISSING: {order_id}")
