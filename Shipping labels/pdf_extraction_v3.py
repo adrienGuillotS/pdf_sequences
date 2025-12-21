@@ -49,7 +49,19 @@ def extract_digits_only(id_text):
 
 def get_first_last_digits(id_text, n=4):
     """Get first n and last n digits from an ID."""
-    id_text = id_text.split("-")[2]
+    if not id_text:
+        return None, None
+    
+    # Try to get the last part after splitting by "-"
+    parts = id_text.split("-")
+    if len(parts) >= 3:
+        # Format like PO-210-10386798799991976
+        id_text = parts[2]
+    elif len(parts) >= 2:
+        # Format like PO-10386798799991976
+        id_text = parts[1]
+    # else: use the whole id_text
+    
     digits = extract_digits_only(id_text)
     if len(digits) < n * 2:
         return None, None
