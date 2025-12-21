@@ -40,7 +40,13 @@ def extract_one_id_from_label_text(text):
     # 1. Standard PO | 2. Long Format
     pattern = r"(?i)PO[\s-]*\d+[\d-]*|\d{4}-\d{10,}"
     match = re.search(pattern, text)
-    return match.group(0) if match else None
+    if match:
+        result = match.group(0)
+        # Filter out invalid short IDs like PO9 (from postal codes like "PO9 5FH")
+        digits = re.sub(r"[^0-9]", "", result)
+        if len(digits) >= 8:  # Valid IDs should have at least 8 digits
+            return result
+    return None
 
 def extract_digits_only(id_text):
     """Extract only digits from an ID."""
@@ -245,9 +251,9 @@ def process_files(guide_path, input_pdf_paths, output_path, log_callback):
                     is_rm = "royal mail" in text.lower()
                     
                     if is_rm:
-                        overlay = create_overlay_page(w, h, image_path, order_id, count, 158, -252, 0.06, 315, 9, rm_mode=True)
+                        overlay = create_overlay_page(w, h, image_path, matched_id, count, 158, -252, 0.06, 315, 9, rm_mode=True)
                     else:
-                        overlay = create_overlay_page(w, h, image_path, order_id, count)
+                        overlay = create_overlay_page(w, h, image_path, matched_id, count)
 
                     p.merge_page(overlay)
                     writer.add_page(p)
@@ -256,23 +262,36 @@ def process_files(guide_path, input_pdf_paths, output_path, log_callback):
                 missing_orders.append(order_id)
                 log_callback(f"❌ MISSING: {order_id}")
 
-        # B. Add extras not in guide
+        # B. Add extras not in guide (check if they match any guide order with flexible matching)
         for label_id, pages in labels_db.items():
             if label_id not in processed_ids:
-                log_callback(f"➕ EXTRA Added: {label_id}")
-                for p in pages:
-                    w = float(p.mediabox[2])
-                    h = float(p.mediabox[3])
-                    
-                    text = p.extract_text() or ""
-                    is_rm = "royal mail" in text.lower()
-                    
-                    if is_rm:
-                        overlay = create_overlay_page(w, h, image_path, label_id, 1, 158, -252, 0.06, 315, 9, rm_mode=True)
-                    else:
-                        overlay = create_overlay_page(w, h, image_path, label_id, 1)
-                    p.merge_page(overlay)
-                    writer.add_page(p)
+                # Check if this extra matches any guide order with flexible matching
+                is_duplicate = False
+                for guide_id in guide_sequence:
+                    if guide_id not in processed_ids:
+                        # Check flexible match
+                        guide_first, guide_last = get_first_last_digits(guide_id)
+                        label_first, label_last = get_first_last_digits(label_id)
+                        if guide_first and label_first and guide_first == label_first and guide_last == label_last:
+                            log_callback(f"⚠️  SKIP: {label_id} (matches missing guide order {guide_id})")
+                            is_duplicate = True
+                            break
+                
+                if not is_duplicate:
+                    log_callback(f"➕ EXTRA Added: {label_id}")
+                    for p in pages:
+                        w = float(p.mediabox[2])
+                        h = float(p.mediabox[3])
+                        
+                        text = p.extract_text() or ""
+                        is_rm = "royal mail" in text.lower()
+                        
+                        if is_rm:
+                            overlay = create_overlay_page(w, h, image_path, label_id, 1, 158, -252, 0.06, 315, 9, rm_mode=True)
+                        else:
+                            overlay = create_overlay_page(w, h, image_path, label_id, 1)
+                        p.merge_page(overlay)
+                        writer.add_page(p)
 
         with open(output_path, "wb") as f_out:
             writer.write(f_out)
