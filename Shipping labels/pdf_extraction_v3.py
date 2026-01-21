@@ -47,6 +47,14 @@ def extract_one_id_from_label_text(text):
         digits = re.sub(r"[^0-9]", "", result)
         if len(digits) >= 8:  # Valid IDs should have at least 8 digits
             return result
+    else :
+        pattern = r"\d{4}\s*/\s*\d{10}"
+        match = re.search(pattern, text)
+        if match:
+            result = match.group(0)
+            digits = result.split("/ ")[1]
+            if len(digits) >= 8:  # Valid IDs should have at least 8 digits
+                return result
     return None
 
 def extract_digits_only(id_text):
