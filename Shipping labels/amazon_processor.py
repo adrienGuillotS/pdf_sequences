@@ -77,7 +77,7 @@ def create_amazon_overlay(width, height, image_path, order_number, count=1):
     # Add order number text with count prefix if needed
     can.setFont("Helvetica-Bold", 8)
     if count > 1:
-        text = f"*{count} Customer Reference: {order_number}"
+        text = f"Customer Reference: {order_number} *{count}"
     else:
         text = f"Customer Reference: {order_number}"
     can.drawString(15, height-318, text)
