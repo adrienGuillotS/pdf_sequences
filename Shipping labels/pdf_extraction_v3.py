@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 import threading
 import PyPDF2
 from reportlab.pdfgen import canvas
@@ -10,6 +10,7 @@ from collections import Counter
 import os
 import base64
 import tempfile
+from amazon_processor import process_amazon_files, CAUTION_IMAGE_AMZ_BASE64
 
 # ------------------ UTILITY FUNCTIONS (BUSINESS LOGIC) ------------------
 
@@ -102,6 +103,7 @@ def find_matching_label(guide_id, labels_db, log_callback):
         return matched_labels, "flexible"
     
     return [], None
+
 
 def create_overlay_page(width, height, image_path, text_id, count,pos_x=15,pos_y=78,scale=0.07,img_y=10,size_police=11,rm_mode=False):
     packet = io.BytesIO()
@@ -360,35 +362,75 @@ def process_files(guide_path, input_pdf_paths, output_path, log_callback):
 class PDFApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("PDF Label Sorter")
-        self.root.geometry("700x650")
+        self.root.title("PDF Label Sorter - Amazon & Temu")
+        self.root.geometry("750x700")
 
-        # Variables
-        self.path_guide = tk.StringVar()
-        self.path_source1 = tk.StringVar()
-        self.path_source2 = tk.StringVar()
-
-        # UI Construction
+        # Header
         tk.Label(root, text="PDF Label Sorting Tool", font=("Arial", 16, "bold")).pack(pady=10)
-        tk.Label(root, text="Process 1 or 2 courier files - merged and sorted by guide", 
+        tk.Label(root, text="Choose platform: Amazon (up to 5 labels) or Temu (up to 2 labels)", 
                  font=("Arial", 9), fg="gray").pack(pady=(0, 10))
 
-        self.create_file_selector("1. Guide File (PDF)", self.path_guide, [("PDF Files", "*.pdf")])
-        self.create_file_selector("2. Source Labels #1 (PDF)", self.path_source1, [("PDF Files", "*.pdf")])
-        self.create_file_selector("3. Source Labels #2 (Optional)", self.path_source2, [("PDF Files", "*.pdf")])
+        # Notebook (Tabs)
+        self.notebook = ttk.Notebook(root)
+        self.notebook.pack(fill="both", expand=True, padx=20, pady=(0, 10))
 
-        # Action Button
-        btn_run = tk.Button(root, text="START PROCESSING", command=self.start_thread, 
-                            bg="#007AFF", fg="white", font=("Arial", 12, "bold"), height=2)
-        btn_run.pack(pady=20, fill="x", padx=40)
+        # Amazon Tab
+        self.amazon_frame = tk.Frame(self.notebook)
+        self.notebook.add(self.amazon_frame, text="Amazon")
+        self.setup_amazon_tab()
 
-        # Log Area
+        # Temu Tab
+        self.temu_frame = tk.Frame(self.notebook)
+        self.notebook.add(self.temu_frame, text="Temu")
+        self.setup_temu_tab()
+
+        # Log Area (shared)
         tk.Label(root, text="Execution Log:").pack(anchor="w", padx=20)
-        self.log_area = scrolledtext.ScrolledText(root, height=15, state='disabled')
+        self.log_area = scrolledtext.ScrolledText(root, height=12, state='disabled')
         self.log_area.pack(padx=20, pady=(0, 20), fill="both", expand=True)
 
-    def create_file_selector(self, label_text, var, file_types):
-        frame = tk.Frame(self.root)
+    def setup_amazon_tab(self):
+        self.amazon_guide = tk.StringVar()
+        self.amazon_sources = [tk.StringVar() for _ in range(5)]
+
+        tk.Label(self.amazon_frame, text="Amazon Configuration", 
+                 font=("Arial", 12, "bold")).pack(pady=10)
+
+        self.create_file_selector_in_frame(self.amazon_frame, "Guide File (PDF)", 
+                                           self.amazon_guide, [("PDF Files", "*.pdf")])
+        
+        for i in range(5):
+            label = f"Source Labels #{i+1} {'(Optional)' if i > 0 else ''}"
+            self.create_file_selector_in_frame(self.amazon_frame, label, 
+                                               self.amazon_sources[i], [("PDF Files", "*.pdf")])
+
+        btn_amazon = tk.Button(self.amazon_frame, text="START AMAZON PROCESSING", 
+                               command=self.start_amazon_thread, 
+                               bg="#FF9900", fg="white", font=("Arial", 12, "bold"), height=2)
+        btn_amazon.pack(pady=20, fill="x", padx=40)
+
+    def setup_temu_tab(self):
+        self.temu_guide = tk.StringVar()
+        self.temu_source1 = tk.StringVar()
+        self.temu_source2 = tk.StringVar()
+
+        tk.Label(self.temu_frame, text="Temu Configuration", 
+                 font=("Arial", 12, "bold")).pack(pady=10)
+
+        self.create_file_selector_in_frame(self.temu_frame, "Guide File (PDF)", 
+                                           self.temu_guide, [("PDF Files", "*.pdf")])
+        self.create_file_selector_in_frame(self.temu_frame, "Source Labels #1 (PDF)", 
+                                           self.temu_source1, [("PDF Files", "*.pdf")])
+        self.create_file_selector_in_frame(self.temu_frame, "Source Labels #2 (Optional)", 
+                                           self.temu_source2, [("PDF Files", "*.pdf")])
+
+        btn_temu = tk.Button(self.temu_frame, text="START TEMU PROCESSING", 
+                            command=self.start_temu_thread, 
+                            bg="#007AFF", fg="white", font=("Arial", 12, "bold"), height=2)
+        btn_temu.pack(pady=20, fill="x", padx=40)
+
+    def create_file_selector_in_frame(self, parent_frame, label_text, var, file_types):
+        frame = tk.Frame(parent_frame)
         frame.pack(fill="x", padx=20, pady=5)
         tk.Label(frame, text=label_text, width=25, anchor="w", font=("Arial", 10)).pack(side="left")
         entry = tk.Entry(frame, textvariable=var)
@@ -406,28 +448,49 @@ class PDFApp:
         self.log_area.see(tk.END)
         self.log_area.config(state='disabled')
 
-    def start_thread(self):
-        # Validation
-        if not self.path_guide.get() or not self.path_source1.get():
+    def start_amazon_thread(self):
+        if not self.amazon_guide.get() or not self.amazon_sources[0].get():
             messagebox.showwarning("Warning", "Please select guide file and at least one source file.")
             return
         
-        # Collect input files (1 or 2)
-        input_files = [self.path_source1.get()]
-        if self.path_source2.get():
-            input_files.append(self.path_source2.get())
+        input_files = [src.get() for src in self.amazon_sources if src.get()]
         
-        # Set output file in same directory as first source
-        source_dir = os.path.dirname(self.path_source1.get())
-        output_file = os.path.join(source_dir, "Sorted_Labels.pdf")
+        if len(input_files) > 5:
+            messagebox.showwarning("Warning", "Maximum 5 label files allowed for Amazon.")
+            return
+        
+        source_dir = os.path.dirname(self.amazon_sources[0].get())
+        output_file = os.path.join(source_dir, "Amazon_Sorted_Labels.pdf")
 
-        # Clear logs and start processing
+        self.log_area.config(state='normal')
+        self.log_area.delete(1.0, tk.END)
+        self.log_area.config(state='disabled')
+        
+        threading.Thread(target=process_amazon_files, args=(
+            self.amazon_guide.get(),
+            input_files,
+            output_file,
+            self.log
+        )).start()
+
+    def start_temu_thread(self):
+        if not self.temu_guide.get() or not self.temu_source1.get():
+            messagebox.showwarning("Warning", "Please select guide file and at least one source file.")
+            return
+        
+        input_files = [self.temu_source1.get()]
+        if self.temu_source2.get():
+            input_files.append(self.temu_source2.get())
+        
+        source_dir = os.path.dirname(self.temu_source1.get())
+        output_file = os.path.join(source_dir, "Temu_Sorted_Labels.pdf")
+
         self.log_area.config(state='normal')
         self.log_area.delete(1.0, tk.END)
         self.log_area.config(state='disabled')
         
         threading.Thread(target=process_files, args=(
-            self.path_guide.get(),
+            self.temu_guide.get(),
             input_files,
             output_file,
             self.log
