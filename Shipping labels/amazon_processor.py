@@ -124,13 +124,12 @@ def analyze_amazon_guide(guide_path, log_callback):
 
 def analyze_amazon_labels(input_pdf_paths, log_callback):
     """
-    Analyze Amazon label PDFs and extract order numbers.
-    Supports up to 5 files.
-    Returns: (labels_db, pdf_readers) - labels_db maps order_number -> (reader_idx, page_idx)
+    Analyze Amazon label PDFs and extract order mapping.
+    Amazon labels have a "List of orders" page at the end with IDs in order of appearance.
+    Returns: (labels_mapping, pdf_readers) - labels_mapping maps order_id -> (reader_idx, page_idx)
     """
-    labels_db = {}
+    labels_mapping = {}
     pdf_readers = []
-    total_lines = 0
     
     for file_idx, input_pdf_path in enumerate(input_pdf_paths, 1):
         log_callback(f"📦 Reading Amazon Labels {file_idx}/{len(input_pdf_paths)}: {input_pdf_path}")
@@ -140,36 +139,50 @@ def analyze_amazon_labels(input_pdf_paths, log_callback):
         reader = PyPDF2.PdfReader(f)
         pdf_readers.append((f, reader))
         
-        # Extract all text from PDF
-        all_text = ""
-        for page in reader.pages:
-            all_text += page.extract_text() or ""
+        # Find ALL "List of orders" pages and extract IDs in order
+        # The list can span multiple pages, so we need to read all of them
+        order_ids_in_file = []
+        list_page_found = False
         
-        # Split into lines
-        lines = all_text.split('\n')
-        total_lines += len(lines)
-        log_callback(f"   Total lines in file {file_idx}: {len(lines)}")
+        for page_idx in range(len(reader.pages)):
+            page = reader.pages[page_idx]
+            text = page.extract_text() or ""
+            
+            # Check if this page contains order IDs (list page or continuation)
+            # Criteria: contains "List of orders" OR "successful label purchase" OR has Amazon ID pattern
+            has_list_header = "List of orders" in text or "successful label purchase" in text
+            has_amazon_ids = re.search(r'\d{3}-\d{7}-\d{7}', text) is not None
+            
+            if has_list_header or (has_amazon_ids and list_page_found):
+                log_callback(f"   📋 Found order list page (file {file_idx}, page {page_idx + 1})")
+                # Extract order IDs from this page
+                page_ids = extract_amazon_order_numbers(text)
+                if page_ids:
+                    order_ids_in_file.extend(page_ids)
+                    log_callback(f"   ✓ Extracted {len(page_ids)} order IDs from this page (total: {len(order_ids_in_file)})")
+                    list_page_found = True
+            elif list_page_found:
+                # We've found list pages before, but this page doesn't have IDs
+                # This means we've reached the end of the list
+                break
         
-        # Extract order numbers
-        orders = extract_amazon_order_numbers(all_text)
-        log_callback(f"   Orders found in file {file_idx}: {len(orders)}")
+        if not list_page_found:
+            log_callback(f"   ⚠️  WARNING: No 'List of orders' page found in file {file_idx}")
+            continue
         
-        # Map order numbers to pages (store reader index and page index)
-        page_idx = 0
-        for order in orders:
-            if page_idx < len(reader.pages):
-                if order not in labels_db:
-                    labels_db[order] = []
-                
-                # Store reference to reader and page index
-                labels_db[order].append((file_idx - 1, page_idx))
-                log_callback(f"   ✓ {order} mapped to page {page_idx + 1}")
-                page_idx += 1
+        # Map each order ID to its corresponding page (ID at position N = page N)
+        for idx, order_id in enumerate(order_ids_in_file):
+            if idx < len(reader.pages):
+                # Check that this page is not the summary page
+                page = reader.pages[idx]
+                page_text = page.extract_text() or ""
+                if "List of orders" not in page_text:
+                    labels_mapping[order_id] = (file_idx - 1, idx)
+                    log_callback(f"   ✓ {order_id} → page {idx + 1}")
     
-    log_callback(f"ℹ️  Total lines processed: {total_lines}")
-    log_callback(f"ℹ️  Total unique labels identified: {len(labels_db)}")
+    log_callback(f"ℹ️  Total orders mapped: {len(labels_mapping)}")
     
-    return labels_db, pdf_readers
+    return labels_mapping, pdf_readers
 
 def process_amazon_files(guide_path, input_pdf_paths, output_path, log_callback):
     """
@@ -189,8 +202,8 @@ def process_amazon_files(guide_path, input_pdf_paths, output_path, log_callback)
         # STEP 1: Analyze Guide
         guide_sequence, guide_counts = analyze_amazon_guide(guide_path, log_callback)
         
-        # STEP 2: Analyze Labels (up to 5 files)
-        labels_db, pdf_readers = analyze_amazon_labels(input_pdf_paths, log_callback)
+        # STEP 2: Analyze Labels (up to 5 files) - Extract ID->page mapping
+        labels_mapping, pdf_readers = analyze_amazon_labels(input_pdf_paths, log_callback)
         
         # STEP 3: Generate sorted PDF with Amazon image overlay
         log_callback("💾 Generating sorted PDF with Amazon caution image...")
@@ -199,67 +212,65 @@ def process_amazon_files(guide_path, input_pdf_paths, output_path, log_callback)
         # Get Amazon image path
         image_path = get_amazon_image_path()
         
-        processed_orders = set()
         missing_orders = []
+        processed_orders = set()
         
-        # Add pages in guide sequence order
+        # Match guide order with label pages using ID mapping
         for order in guide_sequence:
-            if order in labels_db:
+            if order in labels_mapping:
                 log_callback(f"✅ MATCH: {order}")
                 
-                page_refs = labels_db[order]
+                reader_idx, page_idx = labels_mapping[order]
+                _, reader = pdf_readers[reader_idx]
+                page = reader.pages[page_idx]
+                
                 count = guide_counts[order]
                 
-                for reader_idx, page_idx in page_refs:
-                    _, reader = pdf_readers[reader_idx]
-                    page = reader.pages[page_idx]
-                    
-                    # Create overlay with Amazon image, order number and count
-                    overlay = create_amazon_overlay(
-                        float(page.mediabox.width),
-                        float(page.mediabox.height),
-                        image_path,
-                        order,
-                        count
-                    )
-                    
-                    # Merge using temporary writer for Adobe compatibility
-                    temp_writer = PyPDF2.PdfWriter()
-                    temp_writer.add_page(page)
-                    temp_writer.pages[0].merge_page(overlay)
-                    
-                    # Add merged page to final writer
-                    writer.add_page(temp_writer.pages[0])
+                # Create overlay with Amazon image, order number and count
+                overlay = create_amazon_overlay(
+                    float(page.mediabox.width),
+                    float(page.mediabox.height),
+                    image_path,
+                    order,
+                    count
+                )
                 
+                # Merge using temporary writer for Adobe compatibility
+                temp_writer = PyPDF2.PdfWriter()
+                temp_writer.add_page(page)
+                temp_writer.pages[0].merge_page(overlay)
+                
+                # Add merged page to final writer
+                writer.add_page(temp_writer.pages[0])
                 processed_orders.add(order)
             else:
                 log_callback(f"❌ MISSING: {order}")
                 missing_orders.append(order)
         
-        # Add extra labels not in guide (count=1 by default for extras)
-        for order, page_refs in labels_db.items():
+        # Add extra labels not in guide
+        for order, (reader_idx, page_idx) in labels_mapping.items():
             if order not in processed_orders:
                 log_callback(f"➕ EXTRA: {order}")
-                for reader_idx, page_idx in page_refs:
-                    _, reader = pdf_readers[reader_idx]
-                    page = reader.pages[page_idx]
-                    
-                    # Create overlay with Amazon image and order number (count=1 for extras)
-                    overlay = create_amazon_overlay(
-                        float(page.mediabox.width),
-                        float(page.mediabox.height),
-                        image_path,
-                        order,
-                        1
-                    )
-                    
-                    # Merge using temporary writer for Adobe compatibility
-                    temp_writer = PyPDF2.PdfWriter()
-                    temp_writer.add_page(page)
-                    temp_writer.pages[0].merge_page(overlay)
-                    
-                    # Add merged page to final writer
-                    writer.add_page(temp_writer.pages[0])
+                
+                _, reader = pdf_readers[reader_idx]
+                page = reader.pages[page_idx]
+                
+                # Create overlay with count=1 for extras
+                overlay = create_amazon_overlay(
+                    float(page.mediabox.width),
+                    float(page.mediabox.height),
+                    image_path,
+                    order,
+                    1
+                )
+                
+                # Merge using temporary writer for Adobe compatibility
+                temp_writer = PyPDF2.PdfWriter()
+                temp_writer.add_page(page)
+                temp_writer.pages[0].merge_page(overlay)
+                
+                # Add merged page to final writer
+                writer.add_page(temp_writer.pages[0])
         
         # Write output
         with open(output_path, "wb") as f_out:
@@ -270,7 +281,7 @@ def process_amazon_files(guide_path, input_pdf_paths, output_path, log_callback)
         log_callback(f"✅ Processing complete!")
         log_callback(f"📄 Output: {output_path}")
         log_callback(f"📊 Orders in guide: {len(guide_sequence)}")
-        log_callback(f"📦 Labels found: {len(labels_db)}")
+        log_callback(f"📦 Labels found: {len(labels_mapping)}")
         log_callback(f"✓ Matched: {len(processed_orders)}")
         log_callback(f"✗ Missing: {len(missing_orders)}")
         
